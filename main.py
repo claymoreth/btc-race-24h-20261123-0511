@@ -120,9 +120,11 @@ def on_batch(state, batch):
             return _buy_all(state)
         return []
 
-    # Bought before and stopped out: rebuy only on a new high above the
-    # peak the stop exited from (trend resumption, not a dead-cat bounce).
-    if _exit_peak > 0 and close >= _exit_peak:
+    # Bought before and stopped out: rebuy only on a new high strictly above
+    # the peak the stop exited from (trend resumption, not a dead-cat bounce).
+    # Strictly greater, not >=: a close merely re-testing the exit peak is
+    # not a new high and must not re-trigger an entry on its own.
+    if _exit_peak > 0 and close > _exit_peak:
         return _buy_all(state)
     return []
 
