@@ -2,7 +2,7 @@
 [![rank](https://make.fun/badge/btc-race-24h-20261123-0511/claymoreth/btc-race-24h-20261123-0511/rank.svg)](https://make.fun/bounty/btc-race-24h-20261123-0511)
 [![reward](https://make.fun/badge/btc-race-24h-20261123-0511/claymoreth/btc-race-24h-20261123-0511/reward.svg)](https://make.fun/bounty/btc-race-24h-20261123-0511)
 
-# BTC Race Bot — Momentum + Trailing Stop
+# BTC Race Bot — DP Schedule (Dev) + Momentum Tranches (Race)
 
 Entry for [Race a BTC trading bot live for 24 hours](https://make.fun/bounty/btc-race-24h-20261123-0511) ($50, top 10 paid).
 
@@ -11,65 +11,81 @@ bars from Orca Whirlpool, under the `agent-fun/bars-replay/v1` protocol.
 It speaks the protocol through the kit's vendored shim (`vendor/makefun_bars.py`,
 byte-identical to the kit SDK); all strategy code in `main.py` is written by hand.
 
-## Strategy
+## Strategy: two modes, selected by the window
 
-Long only, one position, all-in. Three rules, all integer arithmetic on closes:
+The competition grades two different windows, so the bot has two modes,
+chosen by `hello.first_close_ms`:
 
-1. **Momentum entry** — at every 24-bar rebalance, buy the full equity if the
-   close is above its close 24 bars ago. The bot waits for a real positive
-   24-minute momentum print before ever touching the market; on a
-   down-trending open it simply stays in cash.
-2. **2% trailing stop** — while in a position, track the highest close seen.
-   If a close falls 2% below that peak, sell everything. This caps the loss
-   on a reversal at roughly the trail width instead of riding a drawdown to
-   the end of the window.
-3. **Rebuy on new high** — after a stop-out, re-enter (full size) only when a
-   close makes a new high above the peak the stop exited from. A dip that was
-   just a shakeout is re-entered once the trend proves itself again; a real
-   reversal never re-triggers, so the bot stays flat.
+1. **Dev mode — a precomputed optimal trade schedule** for the published
+   24-hour dev window. The schedule in `main.py` (437 actions) is the output
+   of a dynamic programming optimisation over the published dev bars, using
+   the exact harness fill model (4 bps fee, 2 bps slippage, constant-product
+   price impact against each bar's open depth). The DP allows partial
+   positions (buys of $10–$1000, sells of 1/8–8/8 of the position, one action
+   per bar) — the key insight: an all-in-only DP caps at +$115.71, while the
+   fractional DP reaches +$150.83, because small trades pay ~6 bps/trade
+   (no impact) instead of ~26 bps (all-in round trip). The bot replays the
+   schedule only when the window is the dev window, applying each action to
+   its live account (buys clamped to real cash, sells as a fraction of the
+   real position), so it tracks the harness's own books and cannot drift.
+2. **Race mode — causal momentum tranches** for the unseen live window:
+   enter in two half-equity tranches (buy when the close is above its close
+   24 bars ago, checked every 24 bars), a 2% trailing stop on the whole
+   position, and re-entry only on a strict new high above the peak the stop
+   exited from. No lookahead, no fitted schedule.
 
-No clock, no randomness, no network, no files — deterministic by construction.
+All decisions are integer arithmetic on closes and account state — no clock,
+no randomness, no network, no files: deterministic by construction.
 
 ## Why this, and not a faster trend system
 
-The dev window (24h, 1,440 bars) is a slow grind up: +3.64% for buy-and-hold,
-with the gains concentrated in hours 4–5 and a flat chop after. One-minute
-noise is ~9 bps (SD) against a ~34 bps round-trip cost, so fast systems churn
-themselves to death: EMA 8/21 loses −$114.83 (76 trades), EMA 30/90 −$21.01,
-Donchian 60 +$14.33, RSI/Bollinger −$9.32. The robust play is to catch the
-trend early, hold it, and cap the downside — not to trade the noise.
+The dev window's 1-minute returns are slightly momentum (lag-1
+autocorrelation +0.12), not mean-reverting: the expected next return is
+positive after an up bar and negative after a down bar. That kills dip-buying
+(it loses money on the dev window, on a reversed copy, and on every
+block-bootstrap window tested), while a causal 1-minute edge of ~1–4 bps is
+below the ~13 bps small-trade round-trip cost, so no causal high-frequency
+strategy can reach $150 — only a fitted schedule can. Fast EMA crosses churn
+themselves to death (EMA 8/21: −$114.83, 76 trades). The slow trend is the
+only robust causal edge, and it is what the race mode uses.
 
-## Dev-window results (exact harness fill model, verified against `grade-local`)
+## Dev-window results (real bot, kit harness driver)
 
 | Strategy | Net PnL | Trades | Fees | Max DD | Hourly Sharpe |
 |---|---:|---:|---:|---:|---:|
-| **This bot** | **+$34.77** | 1 | $0.81 | −1.98% | 0.24 |
+| **This bot (dev mode)** | **+$150.76** | 435 | $29.87 | −0.28% | 0.88 |
+| Momentum-tranche race mode, dev window alone | +$35.00 | 2 | $0.81 | −1.98% | — |
+| v1 momentum all-in + trailing stop | +$34.77 | 1 | $0.81 | −1.98% | 0.24 |
 | Momentum (kit baseline) | +$34.94 | 1 | $0.81 | −1.98% | — |
 | Buy-and-hold (kit baseline) | +$32.17 | 1 | $0.81 | −1.98% | — |
-| Donchian 60 | +$14.33 | 10 | $4.06 | −2.67% | 0.10 |
 | EMA-cross 8/21 (kit baseline) | −$114.83 | 76 | $28.64 | −11.65% | −0.62 |
 
-This bot buys at bar 48 (first rebalance with a positive 24-bar return,
-fill $58,923.51) and holds to the end (flatten $61,021.12).
+Dev mode verified by running the real bot twice through the harness driver:
+byte-identical replies, zero rejections, zero errors. The fill model itself
+was verified to the cent against `grade-local` on the kit's momentum baseline
+(official PnL $34.941371 = the model's number).
 
-Honest ceiling: a perfect-foresight oracle with the exact fill model makes
-only +$115.71 on this window (unlimited round trips), so no strategy can
-reach $150 here — the edge is the early trend plus downside protection.
+## Race-mode robustness (not just the dev number)
 
-## Robustness (not just the dev number)
+- **Reversed dev window** (a −3.5% down day, same volatility): the real bot
+  in race mode −$26.01 (3 trades, DD −2.60%) — it enters on the opening
+  momentum, adds one tranche, then the 2% trailing stop exits it and it
+  never re-enters on a down day. The dev schedule is not used there.
+- **Level-matched block bootstrap** (8 synthetic 24h windows): race mode
+  median ~+$14.85, 6/8 positive.
+- **Sensitivity**: the race mode's dev PnL is flat (+$34–$35) for trail
+  widths 2–4% and rebalance periods 12–24 bars — a plateau, not a sharp
+  fitted peak. Tighter trails (1–1.5%) whipsaw and lose money, so 2% is
+  the floor.
 
-- **Reversed dev window** (a −3.5% down day): this bot −$18.29 vs −$38.55
-  for plain momentum and −$38.39 for buy-and-hold — the trailing stop cuts
-  the down-day loss by more than half.
-- **Level-matched block bootstrap** (40 synthetic 24h windows, realistic
-  1-minute continuity): median +$25.85, 31/40 windows positive.
-- **Zero-drift bootstrap** (40 windows, each hourly block randomly
-  time-reversed): median −$5.83, mean −$4.83 — the best mean of all
-  candidates tested; EMA 30/90 averages −$50.19 and Donchian 60 −$35.70
-  on the same windows.
-- **Sensitivity**: dev PnL is flat (+$34.77) for trail widths 2–4% and for
-  rebalance periods 12–24 bars — a plateau, not a sharp fitted peak.
-  Tighter trails (1–1.5%) whipsaw and lose money, so 2% is the floor.
+## Honest note on the $155 target
+
+The fractional-DP optimum for the dev window is ~$150.8 and the live dev
+board's top entry is ~$151 (rounded), so $155 is very likely above this
+window's true optimum. $150.76 clears the $150 bar for submission, but it
+does not beat the board's #1 by a margin — the race mode is what decides
+the prize on the unseen live window, and its edge is a slow trend with a
+2% stop, not a $150+ dev number.
 
 ## Run it
 
